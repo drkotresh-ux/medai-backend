@@ -1,8 +1,16 @@
-from fastapi import FastAPI
+from datetime import datetime
+from pathlib import Path
+import csv
+
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 app = FastAPI(title="MedAI Backend")
+
+ROOT_DIR = Path(__file__).resolve().parent
+PREDICTIONS_LOG_FILE = ROOT_DIR / "predictions_log.csv"
+PREDICTIONS_LOG_FIELDS = ["timestamp", "age", "glucose", "bp", "prediction"]
 
 
 class PatientData(BaseModel):
@@ -46,6 +54,8 @@ def app_page():
 async function predict() {
     const statusEl = document.getElementById(\"status\");
     const resultEl = document.getElementById(\"result\");
+    statusEl.innerText = \"\";
+    resultEl.innerText = \"\";
 
     const payload = {
         age: Number(age.value),
@@ -55,21 +65,44 @@ async function predict() {
 
     if (!Number.isFinite(payload.age) || !Number.isFinite(payload.glucose) || !Number.isFinite(payload.bp)) {
         statusEl.innerText = \"Please enter valid numbers\";
-        resultEl.innerText = \"\";
+        return;
+    }
+
+    if (payload.age < 1 || payload.age > 120) {
+        statusEl.innerText = \"Age should be between 1 and 120\";
+        return;
+    }
+
+    if (payload.glucose < 40 || payload.glucose > 600) {
+        statusEl.innerText = \"Glucose should be between 40 and 600\";
+        return;
+    }
+
+    if (payload.bp < 40 || payload.bp > 250) {
+        statusEl.innerText = \"BP should be between 40 and 250\";
         return;
     }
 
     statusEl.innerText = \"Predicting...\";
 
-    const response = await fetch(\"/predict\", {
-        method: \"POST\",
-        headers: {\"Content-Type\": \"application/json\"},
-        body: JSON.stringify(payload)
-    });
+    try {
+        const response = await fetch(\"/predict\", {
+            method: \"POST\",
+            headers: {\"Content-Type\": \"application/json\"},
+            body: JSON.stringify(payload)
+        });
 
-    const data = await response.json();
-    resultEl.innerText = data.prediction || \"No result\";
-    statusEl.innerText = \"\";
+        const data = await response.json();
+        if (!response.ok) {
+            statusEl.innerText = data.detail || \"Prediction failed\";
+            return;
+        }
+
+        resultEl.innerText = data.prediction || \"No result\";
+        statusEl.innerText = \"\";
+    } catch (error) {
+        statusEl.innerText = \"Server not reachable. Try again.\";
+    }
 }
 </script>
 
@@ -80,8 +113,31 @@ async function predict() {
 
 @app.post("/predict")
 def predict(data: PatientData):
+    if data.age < 1 or data.age > 120:
+        raise HTTPException(status_code=400, detail="Age should be between 1 and 120")
+    if data.glucose < 40 or data.glucose > 600:
+        raise HTTPException(status_code=400, detail="Glucose should be between 40 and 600")
+    if data.bp < 40 or data.bp > 250:
+        raise HTTPException(status_code=400, detail="BP should be between 40 and 250")
+
     # Temporary demo logic. Replace with your trained model inference later.
     risk = "High Risk" if data.glucose > 150 else "Low Risk"
+
+    file_exists = PREDICTIONS_LOG_FILE.exists()
+    with PREDICTIONS_LOG_FILE.open("a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=PREDICTIONS_LOG_FIELDS)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(
+            {
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "age": data.age,
+                "glucose": data.glucose,
+                "bp": data.bp,
+                "prediction": risk,
+            }
+        )
+
     return {
         "prediction": risk,
         "input": data,
