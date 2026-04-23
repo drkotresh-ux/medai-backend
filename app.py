@@ -2,11 +2,13 @@ from datetime import datetime
 from pathlib import Path
 import csv
 import tempfile
+import io
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel
+from openpyxl import Workbook
 
 app = FastAPI(title="MedAI Backend")
 
@@ -177,3 +179,57 @@ def app_page():
 @app.get("/access")
 def access_page():
     return RedirectResponse(url="/app", status_code=307)
+
+
+@app.get("/users.xlsx")
+def download_users_excel():
+    """Export all captured user data as Excel file"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Users"
+    
+    # Write headers
+    headers = ["Timestamp", "Name", "Phone", "Email"]
+    ws.append(headers)
+    
+    # Collect all data rows
+    rows = []
+    seen = set()
+    
+    def _read(path: Path):
+        if not path.exists():
+            return
+        try:
+            with path.open("r", newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    key = (row.get("timestamp",""), row.get("phone",""))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    rows.append([
+                        row.get("timestamp", ""),
+                        row.get("name", ""),
+                        row.get("phone", ""),
+                        row.get("email", "")
+                    ])
+        except Exception:
+            pass
+    
+    _read(USER_FILE)
+    _read(USER_FILE_FALLBACK)
+    
+    # Write data rows
+    for row in rows:
+        ws.append(row)
+    
+    # Create BytesIO object
+    excel_buffer = io.BytesIO()
+    wb.save(excel_buffer)
+    excel_buffer.seek(0)
+    
+    return StreamingResponse(
+        iter([excel_buffer.getvalue()]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=medai_users.xlsx"}
+    )
