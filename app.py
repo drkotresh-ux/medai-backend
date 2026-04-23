@@ -4,10 +4,24 @@ import csv
 import tempfile
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from pydantic import BaseModel
 
 app = FastAPI(title="MedAI Backend")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://medaisuites.onrender.com",
+        "https://diabetes-ai-model.onrender.com",
+        "http://127.0.0.1:8011",
+        "http://localhost:8011",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 ROOT_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path("/var/data") if Path("/var/data").exists() else ROOT_DIR
@@ -158,3 +172,8 @@ def app_page():
 </body>
 </html>
 """
+
+
+@app.get("/access")
+def access_page():
+    return RedirectResponse(url="/app", status_code=307)
