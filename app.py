@@ -1,235 +1,265 @@
 from datetime import datetime
 from pathlib import Path
-import csv
-import tempfile
+import sqlite3
 import io
-
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
-from pydantic import BaseModel
 from openpyxl import Workbook
 
 app = FastAPI(title="MedAI Backend")
 
+# -----------------------
+# CORS
+# -----------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "https://medai-backend-0o14.onrender.com",
         "https://medaisuites.onrender.com",
-        "https://diabetes-ai-model.onrender.com",
-        "http://127.0.0.1:8011",
-        "http://localhost:8011",
+        "http://localhost:8000",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-ROOT_DIR = Path(__file__).resolve().parent
-DATA_DIR = Path("/var/data") if Path("/var/data").exists() else ROOT_DIR
-PREDICTIONS_LOG_FILE = ROOT_DIR / "predictions_log.csv"
-PREDICTIONS_LOG_FIELDS = ["timestamp", "age", "glucose", "bp", "prediction"]
-USER_FILE = DATA_DIR / "users.csv"
-USER_FILE_FALLBACK = Path(tempfile.gettempdir()) / "medai_users.csv"
-USER_HEADERS = ["timestamp", "name", "phone", "email"]
+# -----------------------
+# DATABASE
+# -----------------------
+DB_FILE = Path("/var/data/users.db") if Path("/var/data").exists() else Path("users.db")
 
 
-class PatientData(BaseModel):
-    age: int
-    glucose: float
-    bp: float
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            name TEXT,
+            phone TEXT,
+            email TEXT
+        )
+        """
+    )
+
+    conn.commit()
+    conn.close()
 
 
+init_db()
+
+# -----------------------
+# HEALTH
+# -----------------------
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
 
 
+# -----------------------
+# HOME
+# -----------------------
 @app.get("/")
 def home():
-    return JSONResponse({"status": "MedAI Backend Running", "routes": ["/user (POST)", "/users (GET)", "/login (GET)", "/app (GET)", "/predict (POST)"]})
+    return {
+        "status": "SQLITE VERSION LIVE NOW",
+        "routes": ["/login", "/user", "/users", "/users.xlsx", "/debug-db"],
+    }
 
 
+@app.get("/debug-db")
+def debug_db():
+    return {
+        "db_file": str(DB_FILE),
+        "exists": DB_FILE.exists(),
+    }
+
+
+# -----------------------
+# LOGIN PAGE
+# -----------------------
 @app.get("/login", response_class=HTMLResponse)
 def login_page():
     return """
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="UTF-8">
-  <title>MedAI Login</title>
+<title>MedAI Login</title>
 </head>
-<body style="text-align:center; margin-top:100px; font-family:Arial;">
+<body style="text-align:center;margin-top:100px;font-family:Arial;">
 <h2>MedAI Login</h2>
+
 <input id="name" placeholder="Enter Name"><br><br>
 <input id="phone" placeholder="Enter Phone"><br><br>
 <input id="email" placeholder="Email (optional)"><br><br>
+
 <button onclick="login()">Login</button>
+
 <script>
-async function login() {
-  const name = document.getElementById("name").value.trim();
-  const phone = document.getElementById("phone").value.trim();
-  const email = document.getElementById("email").value.trim();
-  if (!phone) { alert("Phone required"); return; }
-  try {
-    const res = await fetch("/user", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ name, phone, email })
-    });
-    if (res.ok) {
-      alert("Saved");
-      localStorage.setItem("user", JSON.stringify({ name, phone }));
-      window.location.href = "/app";
-    } else {
-      const t = await res.text();
-      alert("Failed: " + t);
-    }
-  } catch (e) { alert("Connection error"); }
+async function login(){
+ const name=document.getElementById("name").value.trim();
+ const phone=document.getElementById("phone").value.trim();
+ const email=document.getElementById("email").value.trim();
+
+ if(!phone){
+   alert("Phone required");
+   return;
+ }
+
+ const res=await fetch("/user",{
+   method:"POST",
+   headers:{"Content-Type":"application/json"},
+   body:JSON.stringify({name,phone,email})
+ });
+
+ if(res.ok){
+   localStorage.setItem("user",JSON.stringify({name,phone}));
+   window.location.href="/app";
+ }else{
+   alert("Failed");
+ }
 }
 </script>
+
 </body>
 </html>
 """
 
 
+# -----------------------
+# SAVE USER
+# -----------------------
 @app.post("/user")
 def save_user(data: dict, request: Request):
     name = str(data.get("name", "")).strip()
     phone = str(data.get("phone", "")).strip()
+    email = str(data.get("email", "")).strip()
+
     if not phone:
         raise HTTPException(status_code=400, detail="Phone required")
-    row = {
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
-        "name": name or phone,
-        "phone": phone,
-        "email": str(data.get("email", "")).strip(),
-    }
-    def _append_row(target_file: Path) -> None:
-        file_exists = target_file.exists()
-        with target_file.open("a", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=USER_HEADERS)
-            if not file_exists:
-                writer.writeheader()
-            writer.writerow(row)
-    try:
-        _append_row(USER_FILE)
-    except Exception:
-        _append_row(USER_FILE_FALLBACK)
+
+    if not name:
+        name = phone
+
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+
+    cur.execute(
+        "INSERT INTO users (timestamp,name,phone,email) VALUES (?,?,?,?)",
+        (datetime.now().isoformat(timespec="seconds"), name, phone, email),
+    )
+
+    conn.commit()
+    conn.close()
+
     response = JSONResponse({"status": "saved"})
-    response.set_cookie(key="medai_auth", value="1", httponly=True, samesite="lax",
-                        secure=(request.url.scheme == "https"), max_age=60 * 60 * 12)
+    response.set_cookie(
+        key="medai_auth",
+        value="1",
+        httponly=True,
+        samesite="lax",
+        secure=(request.url.scheme == "https"),
+    )
     return response
 
 
-@app.get("/users", response_class=PlainTextResponse)
-def get_users():
-    lines = []
-    seen = set()
-    def _read(path: Path):
-        if not path.exists():
-            return
-        try:
-            with path.open("r", newline="", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    key = (row.get("timestamp",""), row.get("phone",""))
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    lines.append(",".join([row.get("timestamp",""), row.get("name",""), row.get("phone",""), row.get("email","")]))
-        except Exception:
-            pass
-    _read(USER_FILE)
-    _read(USER_FILE_FALLBACK)
-    if not lines:
-        return "No users yet"
-    return "timestamp,name,phone,email\n" + "\n".join(lines)
-
-
-@app.post("/logout")
-def logout_user():
-    response = JSONResponse({"status": "logged_out"})
-    response.delete_cookie("medai_auth")
-    return response
-
-
+# -----------------------
+# APP PAGE
+# -----------------------
 @app.get("/app", response_class=HTMLResponse)
 def app_page():
     return """
-<!DOCTYPE html>
 <html>
-<head>
-    <meta charset=\"UTF-8\">
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
-    <title>MedAI Suite</title>
-</head>
-<body style=\"text-align:center; font-family:Arial; margin-top:100px;\">
+<body style="text-align:center;font-family:Arial;margin-top:100px;">
 <h1>MedAI Suite</h1>
-<p>AI-Powered Clinical Decision Support</p>
-<p style=\"margin-top:24px;\">Login successful.</p>
-<p>Your registration details are now captured in the backend.</p>
-<p><a href=\"/users\">View Registered Users</a></p>
-
+<p>Login successful</p>
+<p><a href="/users">View Users</a></p>
+<p><a href="/users.xlsx">Download Excel</a></p>
 </body>
 </html>
 """
 
 
 @app.get("/access")
-def access_page():
-    return RedirectResponse(url="/app", status_code=307)
+def access():
+    return RedirectResponse("/app")
 
 
+# -----------------------
+# USERS VIEW
+# -----------------------
+@app.get("/users", response_class=PlainTextResponse)
+def get_users():
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+
+    rows = cur.execute(
+        """
+        SELECT timestamp,name,phone,email
+        FROM users
+        ORDER BY id DESC
+        LIMIT 300
+        """
+    ).fetchall()
+
+    conn.close()
+
+    if not rows:
+        return "No users yet"
+
+    lines = ["timestamp,name,phone,email"]
+
+    for r in rows:
+        lines.append(",".join([
+            str(r[0]),
+            str(r[1]),
+            str(r[2]),
+            str(r[3])
+        ]))
+
+    return "\n".join(lines)
+
+
+# -----------------------
+# EXCEL EXPORT
+# -----------------------
 @app.get("/users.xlsx")
 def download_users_excel():
-    """Export all captured user data as Excel file"""
     wb = Workbook()
     ws = wb.active
     ws.title = "Users"
-    
-    # Write headers
-    headers = ["Timestamp", "Name", "Phone", "Email"]
-    ws.append(headers)
-    
-    # Collect all data rows
-    rows = []
-    seen = set()
-    
-    def _read(path: Path):
-        if not path.exists():
-            return
-        try:
-            with path.open("r", newline="", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    key = (row.get("timestamp",""), row.get("phone",""))
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    rows.append([
-                        row.get("timestamp", ""),
-                        row.get("name", ""),
-                        row.get("phone", ""),
-                        row.get("email", "")
-                    ])
-        except Exception:
-            pass
-    
-    _read(USER_FILE)
-    _read(USER_FILE_FALLBACK)
-    
-    # Write data rows
+
+    ws.append(["Timestamp", "Name", "Phone", "Email"])
+
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+
+    rows = cur.execute(
+        """
+        SELECT timestamp,name,phone,email
+        FROM users
+        ORDER BY id DESC
+        """
+    ).fetchall()
+
+    conn.close()
+
     for row in rows:
-        ws.append(row)
-    
-    # Create BytesIO object
+        ws.append(list(row))
+
     excel_buffer = io.BytesIO()
     wb.save(excel_buffer)
     excel_buffer.seek(0)
-    
+
     return StreamingResponse(
         iter([excel_buffer.getvalue()]),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=medai_users.xlsx"}
+        headers={
+            "Content-Disposition":
+            "attachment; filename=medai_users.xlsx"
+        }
     )
